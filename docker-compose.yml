@@ -1,0 +1,11 @@
+services:
+  lxmfy-n8n-bot:
+    build: .
+    container_name: lxmfy-n8n-bot
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./identity:/bot/identity
+      - ./lxmf_storage:/bot/lxmf_storage
+      - ./reticulum:/root/.reticulum
+    restart: unless-stopped
