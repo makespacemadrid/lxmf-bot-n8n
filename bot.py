@@ -316,9 +316,12 @@ def create_bot():
     # Announces → webhook n8n (para saludos, etc., lógica en n8n)
     # -----------------------------------------------------------------------
 
-    class SimpleAnnounceHandler(RNS.AnnounceHandler):
+    # RNS.Transport.register_announce_handler únicamente necesita un objeto
+    # con el método ``received_announce``. Algunas instalaciones de Reticulum
+    # no exponen ``RNS.AnnounceHandler`` como clase base pública, por lo que
+    # evitamos heredar de ella y usamos un simple contenedor.
+    class SimpleAnnounceHandler:
         def __init__(self, bot_instance):
-            super().__init__()
             self.bot = bot_instance
 
         def received_announce(self, destination_hash, announced_identity, app_data):
