@@ -229,8 +229,6 @@ def create_bot():
         cogs_dir="",
         signature_verification_enabled=SIGNATURE_VERIFICATION_ENABLED,
         require_message_signatures=REQUIRE_MESSAGE_SIGNATURES,
-        identity_path=IDENTITY_PATH or None,
-        storage_path=LXMF_STORAGE_PATH or None,
     )
 
     # Icono del bot
