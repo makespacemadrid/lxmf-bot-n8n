@@ -18,8 +18,10 @@ plantilla de bot, manejo de eventos y la integración con n8n.
 """
 
 import argparse
+import json
 import os
 import time
+from typing import Any
 
 import requests
 from dotenv import load_dotenv
@@ -87,6 +89,37 @@ ICON_FG_COLOR = os.getenv("ICON_FG_COLOR", "ffffff")
 ICON_BG_COLOR = os.getenv("ICON_BG_COLOR", "2563eb")
 BOT_OPERATOR = os.getenv("BOT_OPERATOR", "Anonymous Operator")
 
+
+def _parse_int(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_bool(value: str | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+ANNOUNCE_INTERVAL = _parse_int(
+    os.getenv("ANNOUNCE_INTERVAL") or os.getenv("announce"),
+    600,
+)
+ANNOUNCE_ENABLED = _parse_bool(
+    os.getenv("ANNOUNCE_ENABLED") or os.getenv("announce_enabled"),
+    True,
+)
+ANNOUNCE_IMMEDIATELY = _parse_bool(
+    os.getenv("ANNOUNCE_IMMEDIATELY")
+    or os.getenv("announce_immediately"),
+    True,
+)
+
+DEBUG_WEBHOOK = _parse_bool(os.getenv("DEBUG_WEBHOOK"), False)
+
 # Paths used to persist identity and LXMF storage. These match the docker-compose
 # bind mounts by default but can be overridden via env vars if needed.
 DEFAULT_IDENTITY_PATH = "/bot/identity"
@@ -125,15 +158,66 @@ if LXMF_STORAGE_PATH:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def decode_maybe_bytes(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def make_json_safe(value: Any) -> Any:
+    """Recursively convert values to JSON-serializable equivalents."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+
+    if isinstance(value, dict):
+        safe_dict = {}
+        for key, item in value.items():
+            safe_key = make_json_safe(key)
+            if not isinstance(safe_key, str):
+                safe_key = str(safe_key)
+            safe_dict[safe_key] = make_json_safe(item)
+        return safe_dict
+
+    if isinstance(value, (list, tuple, set)):
+        return [make_json_safe(item) for item in value]
+
+    # Anything else → stringify
+    return str(value)
+
+
+def debug_log(label: str, data: Any | None = None):
+    if not DEBUG_WEBHOOK:
+        return
+
+    if data is None:
+        print(f"[DEBUG] {label}")
+        return
+
+    try:
+        safe_data = make_json_safe(data)
+        print(f"[DEBUG] {label}: {json.dumps(safe_data, ensure_ascii=False)}")
+    except Exception:
+        print(f"[DEBUG] {label}: {data}")
+
+
+# ---------------------------------------------------------------------------
 # Bot principal
 # ---------------------------------------------------------------------------
 
 def create_bot():
     bot = LXMFBot(
         name=BOT_NAME,
-        announce=600,
-        announce_enabled=True,
-        announce_immediately=True,
+        announce=ANNOUNCE_INTERVAL,
+        announce_enabled=ANNOUNCE_ENABLED,
+        announce_immediately=ANNOUNCE_IMMEDIATELY,
         admins=LXMF_ADMINS,
         hot_reloading=True,
         command_prefix="/",
@@ -145,6 +229,8 @@ def create_bot():
         cogs_dir="",
         signature_verification_enabled=SIGNATURE_VERIFICATION_ENABLED,
         require_message_signatures=REQUIRE_MESSAGE_SIGNATURES,
+        identity_path=IDENTITY_PATH or None,
+        storage_path=LXMF_STORAGE_PATH or None,
     )
 
     # Icono del bot
@@ -284,30 +370,27 @@ def create_bot():
             msg_hash = msg_hash.hex()
 
         raw_fields = getattr(lxmf_message, "fields", None)
-        safe_fields = None
-        if isinstance(raw_fields, dict):
-            safe_fields = {}
-            for k, v in raw_fields.items():
-                key_str = str(k)
-                if isinstance(v, (bytes, bytearray)):
-                    safe_fields[key_str] = v.hex()
-                else:
-                    safe_fields[key_str] = v
+        safe_fields = make_json_safe(raw_fields) if isinstance(raw_fields, dict) else None
+
+        title = decode_maybe_bytes(getattr(lxmf_message, "title", None))
+        event_name = decode_maybe_bytes(getattr(event, "name", "message_received"))
 
         payload = {
             "type": "message",
             "sender": sender,  # siempre string
             "content": content_str,
             "meta": {
-                "title": getattr(lxmf_message, "title", None),
+                "title": title,
                 "timestamp": getattr(lxmf_message, "timestamp", None),
                 "hash": msg_hash,
                 "fields": safe_fields,
             },
             "event": {
-                "name": getattr(event, "name", "message_received"),
+                "name": event_name,
             },
         }
+
+        debug_log("webhook_message_payload", payload)
 
         request_start = time.time()
 
@@ -324,6 +407,7 @@ def create_bot():
                 f"Webhook call failed: {e}",
                 lxmf_fields=bot.icon_lxmf_field,
             )
+            debug_log("webhook_request_exception", {"error": str(e)})
             return
 
         response_time = time.time() - request_start
@@ -338,6 +422,10 @@ def create_bot():
                 sender_raw,
                 f"Webhook error: HTTP {resp.status_code}",
                 lxmf_fields=bot.icon_lxmf_field,
+            )
+            debug_log(
+                "webhook_http_error",
+                {"status": resp.status_code, "text": resp.text},
             )
             return
 
@@ -420,6 +508,8 @@ def create_bot():
                 },
             }
 
+            debug_log("webhook_announce_payload", payload)
+
             try:
                 resp = requests.post(
                     WEBHOOK_URL,
@@ -428,10 +518,15 @@ def create_bot():
                 )
             except Exception as e:
                 print(f"[ANN] webhook call failed: {e}")
+                debug_log("announce_webhook_exception", {"error": str(e)})
                 return
 
             if resp.status_code != 200:
                 print(f"[ANN] webhook HTTP {resp.status_code}")
+                debug_log(
+                    "announce_webhook_http_error",
+                    {"status": resp.status_code, "text": resp.text},
+                )
                 return
 
             # Si el webhook devuelve JSON con "reply", lo enviamos como LXMF
@@ -500,6 +595,14 @@ def main():
     print(f"Signature Verification: {sig_status}")
     print(f"Require Message Signatures: {sig_required}")
     print(f"Bot Icon: {BOT_ICON} (FG={ICON_FG_COLOR}, BG={ICON_BG_COLOR})")
+    print(
+        "Announce settings: interval={}s, enabled={}, immediate={}".format(
+            ANNOUNCE_INTERVAL,
+            ANNOUNCE_ENABLED,
+            ANNOUNCE_IMMEDIATELY,
+        )
+    )
+    print(f"Webhook debug logging: {'on' if DEBUG_WEBHOOK else 'off'}")
     if IDENTITY_PATH:
         print(f"Identity path: {IDENTITY_PATH}")
     if LXMF_STORAGE_PATH:
