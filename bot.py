@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +253,60 @@ def debug_log(label: str, data: Any | None = None):
         print(f"[DEBUG] {label}: {data}")
 
 
+@dataclass
+class WebhookResult:
+    data: dict[str, Any] | None
+    text: str
+    response_time: float
+
+
+class WebhookCallError(RuntimeError):
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+def invoke_webhook(payload: dict[str, Any], *, context: str) -> WebhookResult:
+    debug_log(f"{context}_payload", payload)
+
+    request_start = time.time()
+    try:
+        resp = requests.post(
+            WEBHOOK_URL,
+            json=payload,
+            timeout=WEBHOOK_TIMEOUT,
+        )
+    except Exception as exc:
+        debug_log(f"{context}_exception", {"error": str(exc)})
+        raise WebhookCallError(f"Webhook call failed: {exc}") from exc
+
+    response_time = time.time() - request_start
+
+    if resp.status_code != 200:
+        debug_log(
+            f"{context}_http_error",
+            {"status": resp.status_code, "text": resp.text},
+        )
+        raise WebhookCallError(
+            f"Webhook error: HTTP {resp.status_code}",
+            status=resp.status_code,
+        )
+
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+
+    return WebhookResult(data=data, text=resp.text.strip(), response_time=response_time)
+
+
+def record_webhook_success(bot: LXMFBot, elapsed: float):
+    bot.messages_processed += 1
+    bot.response_times.append(elapsed)
+    if len(bot.response_times) > 1000:
+        bot.response_times.pop(0)
+
+
 # ---------------------------------------------------------------------------
 # Bot principal
 # ---------------------------------------------------------------------------
@@ -308,9 +363,6 @@ def create_bot():
 
     @bot.command(name="about", description="Show bot info")
     def about_command(ctx):
-        sig_status = "Enabled" if SIGNATURE_VERIFICATION_ENABLED else "Disabled"
-        sig_required = "Required" if REQUIRE_MESSAGE_SIGNATURES else "Optional"
-
         uptime = format_uptime(time.time() - bot.start_time)
         processed = bot.messages_processed
         errors = bot.error_count
@@ -331,15 +383,7 @@ def create_bot():
                 if avg_response is not None
                 else None
             ),
-            f"Signature Verification: {sig_status}",
-            f"Message Signatures: {sig_required}",
-            f"Bot Icon: {BOT_ICON} (FG={ICON_FG_COLOR}, BG={ICON_BG_COLOR})",
         ]
-
-        if IDENTITY_PATH:
-            lines.append(f"Identity path: {IDENTITY_PATH}")
-        if LXMF_STORAGE_PATH:
-            lines.append(f"LXMF storage: {LXMF_STORAGE_PATH}")
 
         text = "\n".join(filter(None, lines))
         ctx.reply(text, lxmf_fields=bot.icon_lxmf_field)
@@ -432,71 +476,40 @@ def create_bot():
             },
         }
 
-        debug_log("webhook_message_payload", payload)
-
-        request_start = time.time()
-
         try:
-            resp = requests.post(
-                WEBHOOK_URL,
-                json=payload,
-                timeout=WEBHOOK_TIMEOUT,
-            )
-        except Exception as e:
+            result = invoke_webhook(payload, context="webhook_message")
+        except WebhookCallError as exc:
             bot.error_count += 1
             bot.send(
                 sender_raw,
-                f"Webhook call failed: {e}",
+                str(exc),
                 lxmf_fields=bot.icon_lxmf_field,
-            )
-            debug_log("webhook_request_exception", {"error": str(e)})
-            return
-
-        response_time = time.time() - request_start
-        bot.messages_processed += 1
-        bot.response_times.append(response_time)
-        if len(bot.response_times) > 1000:
-            bot.response_times.pop(0)
-
-        if resp.status_code != 200:
-            bot.error_count += 1
-            bot.send(
-                sender_raw,
-                f"Webhook error: HTTP {resp.status_code}",
-                lxmf_fields=bot.icon_lxmf_field,
-            )
-            debug_log(
-                "webhook_http_error",
-                {"status": resp.status_code, "text": resp.text},
             )
             return
 
-        # Intentamos parsear JSON
-        try:
-            data = resp.json()
-        except ValueError:
-            # No es JSON: si hay texto plano, lo mandamos tal cual
-            text = resp.text.strip()
-            if text:
+        record_webhook_success(bot, result.response_time)
+
+        if isinstance(result.data, dict):
+            reply_text = (
+                result.data.get("reply")
+                or result.data.get("response")
+                or result.data.get("text")
+            )
+            title = result.data.get("title") or "Reply"
+
+            if reply_text:
                 bot.send(
                     sender_raw,
-                    text,
+                    reply_text,
+                    title=title,
                     lxmf_fields=bot.icon_lxmf_field,
                 )
             return
 
-        reply_text = (
-            data.get("reply")
-            or data.get("response")
-            or data.get("text")
-        )
-        title = data.get("title") or "Reply"
-
-        if reply_text:
+        if result.text:
             bot.send(
                 sender_raw,
-                reply_text,
-                title=title,
+                result.text,
                 lxmf_fields=bot.icon_lxmf_field,
             )
         # Si no hay reply_text, n8n ha decidido no contestar
@@ -550,32 +563,14 @@ def create_bot():
                 },
             }
 
-            debug_log("webhook_announce_payload", payload)
-
             try:
-                resp = requests.post(
-                    WEBHOOK_URL,
-                    json=payload,
-                    timeout=WEBHOOK_TIMEOUT,
-                )
-            except Exception as e:
-                print(f"[ANN] webhook call failed: {e}")
-                debug_log("announce_webhook_exception", {"error": str(e)})
+                result = invoke_webhook(payload, context="webhook_announce")
+            except WebhookCallError as exc:
+                print(f"[ANN] {exc}")
                 return
 
-            if resp.status_code != 200:
-                print(f"[ANN] webhook HTTP {resp.status_code}")
-                debug_log(
-                    "announce_webhook_http_error",
-                    {"status": resp.status_code, "text": resp.text},
-                )
-                return
-
-            # Si el webhook devuelve JSON con "reply", lo enviamos como LXMF
-            try:
-                data = resp.json()
-            except ValueError:
-                # No es JSON → ignoramos
+            data = result.data if isinstance(result.data, dict) else None
+            if not data:
                 return
 
             reply_text = (
