@@ -5,7 +5,10 @@ services:
     network_mode: host
     env_file: .env
     volumes:
-      - ./identity:/bot/identity
-      - ./lxmf_storage:/bot/lxmf_storage
+      # Persist the LXMFy config directory, which stores the generated
+      # identity and announce settings used by the bot.
+      - ./config:/bot/config
+      # Persist any additional runtime data LXMFy writes under /bot/data.
+      - ./data:/bot/data
       - ./reticulum:/root/.reticulum
     restart: unless-stopped
