@@ -238,6 +238,16 @@ def make_json_safe(value: Any) -> Any:
     return str(value)
 
 
+def log_event_debug(event_name: str, data: Any | None = None):
+    """Helper that routes event debug output through ``debug_log``."""
+
+    if data is None:
+        debug_log(f"event_{event_name}")
+        return
+
+    debug_log(f"event_{event_name}", data)
+
+
 def debug_log(label: str, data: Any | None = None):
     if not DEBUG_WEBHOOK:
         return
@@ -392,6 +402,31 @@ def create_bot():
     # Manejo de mensajes → webhook n8n
     # -----------------------------------------------------------------------
 
+    def register_discovery_debug_listeners():
+        """Attach debug listeners for LXMF discovery-related events."""
+
+        discovery_event_names = (
+            "discovery",
+            "discovery_received",
+            "destination_discovered",
+        )
+
+        for event_name in discovery_event_names:
+
+            @bot.events.on(event_name, EventPriority.NORMAL)
+            def _log_discovery_event(event, _event_name=event_name):
+                event_data = getattr(event, "data", None)
+                log_event_debug(
+                    f"{_event_name}_received",
+                    {
+                        "event": _event_name,
+                        "data": make_json_safe(event_data),
+                        "raw": make_json_safe(event.__dict__),
+                    },
+                )
+
+    register_discovery_debug_listeners()
+
     @bot.events.on("message_received", EventPriority.NORMAL)
     def handle_message(event):
         """
@@ -418,6 +453,16 @@ def create_bot():
         """
         lxmf_message = event.data.get("message")
         sender_raw = event.data.get("sender")
+
+        log_event_debug(
+            "message_received_raw",
+            {
+                "event": decode_maybe_bytes(getattr(event, "name", "message_received")),
+                "sender_raw": make_json_safe(sender_raw),
+                "message_present": bool(lxmf_message),
+                "data": make_json_safe(event.data),
+            },
+        )
 
         if not lxmf_message or not sender_raw:
             return
@@ -476,6 +521,8 @@ def create_bot():
             },
         }
 
+        log_event_debug("message_received_payload", payload)
+
         try:
             result = invoke_webhook(payload, context="webhook_message")
         except WebhookCallError as exc:
@@ -488,6 +535,15 @@ def create_bot():
             return
 
         record_webhook_success(bot, result.response_time)
+
+        log_event_debug(
+            "message_received_webhook_result",
+            {
+                "response_text": result.text,
+                "response_data": make_json_safe(result.data),
+                "response_time": result.response_time,
+            },
+        )
 
         if isinstance(result.data, dict):
             reply_text = (
@@ -562,6 +618,16 @@ def create_bot():
 
             print(f"[ANN] from={dest_hex}, app_data={app_data_str}")
 
+            log_event_debug(
+                "announce_received_raw",
+                {
+                    "from": dest_hex,
+                    "identity_hash": identity_hash_hex,
+                    "public_key": public_key_hex,
+                    "app_data": app_data_str,
+                },
+            )
+
             payload = {
                 "type": "announce",
                 "from": dest_hex,
@@ -573,11 +639,22 @@ def create_bot():
                 },
             }
 
+            log_event_debug("announce_payload", payload)
+
             try:
                 result = invoke_webhook(payload, context="webhook_announce")
             except WebhookCallError as exc:
                 print(f"[ANN] {exc}")
                 return
+
+            log_event_debug(
+                "announce_webhook_result",
+                {
+                    "response_text": result.text,
+                    "response_data": make_json_safe(result.data),
+                    "response_time": result.response_time,
+                },
+            )
 
             data = result.data if isinstance(result.data, dict) else None
             if not data:
