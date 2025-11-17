@@ -123,6 +123,13 @@ ANNOUNCE_IMMEDIATELY = _parse_bool(
 
 DEBUG_WEBHOOK = _parse_bool(os.getenv("DEBUG_WEBHOOK"), False)
 
+# Always emit a human-readable print for anything that comes in so it's
+# possible to trace the LXMF traffic even when webhook debug logging is off.
+INCOMING_EVENT_LOGGING = _parse_bool(
+    os.getenv("INCOMING_EVENT_LOGGING"),
+    True,
+)
+
 # Paths used to persist identity and LXMF storage. These match the docker-compose
 # bind mounts by default but can be overridden via env vars if needed.
 DEFAULT_IDENTITY_PATH = "/bot/identity"
@@ -261,6 +268,24 @@ def debug_log(label: str, data: Any | None = None):
         print(f"[DEBUG] {label}: {json.dumps(safe_data, ensure_ascii=False)}")
     except Exception:
         print(f"[DEBUG] {label}: {data}")
+
+
+def print_incoming_event(label: str, data: Any | None = None):
+    """Always print what arrives from LXMF/Reticulum."""
+
+    if not INCOMING_EVENT_LOGGING:
+        return
+
+    prefix = "[EVENT]"
+    if data is None:
+        print(f"{prefix} {label}")
+        return
+
+    try:
+        safe_data = make_json_safe(data)
+        print(f"{prefix} {label}: {json.dumps(safe_data, ensure_ascii=False)}")
+    except Exception:
+        print(f"{prefix} {label}: {data}")
 
 
 @dataclass
@@ -416,6 +441,14 @@ def create_bot():
             @bot.events.on(event_name, EventPriority.NORMAL)
             def _log_discovery_event(event, _event_name=event_name):
                 event_data = getattr(event, "data", None)
+                print_incoming_event(
+                    _event_name,
+                    {
+                        "event": _event_name,
+                        "data": make_json_safe(event_data),
+                        "raw": make_json_safe(getattr(event, "__dict__", {})),
+                    },
+                )
                 log_event_debug(
                     f"{_event_name}_received",
                     {
@@ -521,6 +554,7 @@ def create_bot():
             },
         }
 
+        print_incoming_event("message_received", payload)
         log_event_debug("message_received_payload", payload)
 
         try:
@@ -639,6 +673,7 @@ def create_bot():
                 },
             }
 
+            print_incoming_event("announce_received", payload)
             log_event_debug("announce_payload", payload)
 
             try:
