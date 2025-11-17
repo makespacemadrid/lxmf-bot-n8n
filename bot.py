@@ -85,6 +85,43 @@ REQUIRE_MESSAGE_SIGNATURES = (
 BOT_ICON = os.getenv("BOT_ICON", "robot")
 ICON_FG_COLOR = os.getenv("ICON_FG_COLOR", "ffffff")
 ICON_BG_COLOR = os.getenv("ICON_BG_COLOR", "2563eb")
+BOT_OPERATOR = os.getenv("BOT_OPERATOR", "Anonymous Operator")
+
+# Paths used to persist identity and LXMF storage. These match the docker-compose
+# bind mounts by default but can be overridden via env vars if needed.
+DEFAULT_IDENTITY_PATH = "/bot/identity"
+DEFAULT_LXMF_STORAGE_PATH = "/bot/lxmf_storage"
+
+IDENTITY_PATH = (
+    os.getenv("LXMFBOT_IDENTITY_PATH")
+    or os.getenv("BOT_IDENTITY_PATH")
+    or os.getenv("IDENTITY_PATH")
+    or DEFAULT_IDENTITY_PATH
+)
+
+LXMF_STORAGE_PATH = (
+    os.getenv("LXMF_STORAGE_PATH")
+    or os.getenv("BOT_LXMF_STORAGE_PATH")
+    or DEFAULT_LXMF_STORAGE_PATH
+)
+
+
+def _ensure_directory(path: str | None):
+    if path:
+        os.makedirs(path, exist_ok=True)
+
+
+_ensure_directory(IDENTITY_PATH)
+_ensure_directory(LXMF_STORAGE_PATH)
+
+# Propagate the resolved paths to env vars expected by lxmfy/RNS so the
+# directories are effectively used when the bot starts.
+if IDENTITY_PATH:
+    os.environ.setdefault("LXMFBOT_IDENTITY_PATH", IDENTITY_PATH)
+    os.environ.setdefault("IDENTITY_PATH", IDENTITY_PATH)
+
+if LXMF_STORAGE_PATH:
+    os.environ.setdefault("LXMF_STORAGE_PATH", LXMF_STORAGE_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +183,37 @@ def create_bot():
         sig_status = "Enabled" if SIGNATURE_VERIFICATION_ENABLED else "Disabled"
         sig_required = "Required" if REQUIRE_MESSAGE_SIGNATURES else "Optional"
 
-        text = (
-            f"{BOT_NAME}\n\n"
-            f"Webhook URL: {WEBHOOK_URL}\n"
-            f"Admins: {len(LXMF_ADMINS)} configured\n"
-            f"Signature Verification: {sig_status}\n"
-            f"Message Signatures: {sig_required}\n"
-            f"Bot Icon: {BOT_ICON} "
-            f"(FG={ICON_FG_COLOR}, BG={ICON_BG_COLOR})"
-        )
+        uptime = format_uptime(time.time() - bot.start_time)
+        processed = bot.messages_processed
+        errors = bot.error_count
+        avg_response = None
+        if bot.response_times:
+            avg_response = sum(bot.response_times) / len(bot.response_times)
+
+        lines = [
+            f"{BOT_NAME}",
+            "",
+            f"Operator: {BOT_OPERATOR}",
+            f"Admins: {len(LXMF_ADMINS)} configured",
+            f"Uptime: {uptime}",
+            f"Messages processed: {processed}",
+            f"Errors: {errors}",
+            (
+                f"Average webhook response: {avg_response:.2f}s"
+                if avg_response is not None
+                else None
+            ),
+            f"Signature Verification: {sig_status}",
+            f"Message Signatures: {sig_required}",
+            f"Bot Icon: {BOT_ICON} (FG={ICON_FG_COLOR}, BG={ICON_BG_COLOR})",
+        ]
+
+        if IDENTITY_PATH:
+            lines.append(f"Identity path: {IDENTITY_PATH}")
+        if LXMF_STORAGE_PATH:
+            lines.append(f"LXMF storage: {LXMF_STORAGE_PATH}")
+
+        text = "\n".join(filter(None, lines))
         ctx.reply(text, lxmf_fields=bot.icon_lxmf_field)
 
     # -----------------------------------------------------------------------
@@ -435,11 +494,16 @@ def main():
     print(f"Webhook URL: {WEBHOOK_URL}")
     if LXMF_ADMINS:
         print(f"Admins: {len(LXMF_ADMINS)} configured")
+    print(f"Operator: {BOT_OPERATOR}")
     sig_status = "Enabled" if SIGNATURE_VERIFICATION_ENABLED else "Disabled"
     sig_required = "Yes" if REQUIRE_MESSAGE_SIGNATURES else "No"
     print(f"Signature Verification: {sig_status}")
     print(f"Require Message Signatures: {sig_required}")
     print(f"Bot Icon: {BOT_ICON} (FG={ICON_FG_COLOR}, BG={ICON_BG_COLOR})")
+    if IDENTITY_PATH:
+        print(f"Identity path: {IDENTITY_PATH}")
+    if LXMF_STORAGE_PATH:
+        print(f"LXMF storage path: {LXMF_STORAGE_PATH}")
 
     bot = create_bot()
     bot.run()
