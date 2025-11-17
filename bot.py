@@ -20,7 +20,9 @@ plantilla de bot, manejo de eventos y la integración con n8n.
 import argparse
 import json
 import os
+import shutil
 import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -125,6 +127,10 @@ DEBUG_WEBHOOK = _parse_bool(os.getenv("DEBUG_WEBHOOK"), False)
 DEFAULT_IDENTITY_PATH = "/bot/identity"
 DEFAULT_LXMF_STORAGE_PATH = "/bot/lxmf_storage"
 
+_RNS_STORAGE_ROOT = Path(os.path.expanduser("~/.reticulum")) / "storage"
+_RNS_IDENTITY_DIR = _RNS_STORAGE_ROOT / "identities"
+_RNS_LXMF_DIR = _RNS_STORAGE_ROOT / "lxmf"
+
 IDENTITY_PATH = (
     os.getenv("LXMFBOT_IDENTITY_PATH")
     or os.getenv("BOT_IDENTITY_PATH")
@@ -146,6 +152,44 @@ def _ensure_directory(path: str | None):
 
 _ensure_directory(IDENTITY_PATH)
 _ensure_directory(LXMF_STORAGE_PATH)
+
+
+def _redirect_rns_storage(default_path: Path, desired_path: str | None, label: str):
+    """Point RNS/LXMF internal directories to our bind-mounted paths."""
+
+    if not desired_path:
+        return
+
+    desired = Path(desired_path).expanduser()
+    default = default_path.expanduser()
+
+    desired.mkdir(parents=True, exist_ok=True)
+    default.parent.mkdir(parents=True, exist_ok=True)
+
+    # If already pointing to the right place, nothing to do.
+    if os.path.realpath(default) == os.path.realpath(desired):
+        return
+
+    # Remove stale symlink or capture existing contents before replacing.
+    if default.is_symlink():
+        if os.path.realpath(default) == os.path.realpath(desired):
+            return
+        default.unlink(missing_ok=True)
+    elif default.exists():
+        # Move any existing files so we don't lose a generated identity.
+        for item in default.iterdir():
+            destination = desired / item.name
+            if destination.exists():
+                continue
+            shutil.move(str(item), str(destination))
+        shutil.rmtree(default)
+
+    default.symlink_to(desired, target_is_directory=True)
+    print(f"Redirected {label} storage to {desired}")
+
+
+_redirect_rns_storage(_RNS_IDENTITY_DIR, IDENTITY_PATH, "identity")
+_redirect_rns_storage(_RNS_LXMF_DIR, LXMF_STORAGE_PATH, "LXMF")
 
 # Propagate the resolved paths to env vars expected by lxmfy/RNS so the
 # directories are effectively used when the bot starts.
